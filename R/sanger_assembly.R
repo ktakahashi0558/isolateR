@@ -55,7 +55,7 @@ sanger_assembly <- function(input=NULL,
   #::::::::::::::::::
   #---Input files
   #::::::::::::::::::
-  input.df <- read.csv(input) %>% mutate(no_suffix= gsub(suffix, "",filename)) %>% mutate(row_counter=seq_along(1:n()))
+  input.df <- read.csv(input) %>% mutate(no_suffix = sub(paste0("(", suffix, ")$"), "", filename)) %>% mutate(row_counter=seq_along(1:n()))
   
   paired.seqs <- input.df %>% dplyr::group_by(no_suffix) %>% dplyr::filter(!n() < 2) %>% dplyr::ungroup()
   unpaired.seqs <- input.df %>% dplyr::group_by(no_suffix) %>% dplyr::filter(n() < 2) %>% dplyr::ungroup()
@@ -69,12 +69,12 @@ sanger_assembly <- function(input=NULL,
   
   if(length(unique(unpaired.seqs$no_suffix)) != 0){message("Warning: ", length(unique(unpaired.seqs$no_suffix)), " files had no matching pair after trimming suffix.",
                                                            " The file(s) will be skipped during alignment steps but will still be included in final output.")}
-
+  
   #::::::::::::::::::
   #---Align seqs
   #::::::::::::::::::
   seq.groupings <- unique(paired.seqs$no_suffix)
-
+  
   collector.list <- lapply(1:length(seq.groupings), function(i){
     #Filter df to get only group of interest
     paired.seqs.filt <- paired.seqs %>% filter(no_suffix == seq.groupings[i]) # ************change back to i
@@ -90,82 +90,71 @@ sanger_assembly <- function(input=NULL,
     failed.aln <- c()
     #---------------
     while(length(seqs) > 0){
-      #Evaluate input sequences as is
-      suppressWarnings(eval.1 <-unlist(lapply(seqs, function(x){Biostrings::pairwiseAlignment(pattern=x, subject=init.seq, type = "local", substitutionMatrix = NULL, scoreOnly=TRUE)})))
-      #Evaluate reverse complement of input sequences
-      suppressWarnings(eval.2 <-unlist(lapply(seqs.rc, function(x){Biostrings::pairwiseAlignment(pattern=x, subject=init.seq, type = "local", substitutionMatrix = NULL, scoreOnly=TRUE)})))
-      #Get best matching seq based on alignment score
+      # 選択ステージのアライメントタイプを "overlap" に変更
+      suppressWarnings(eval.1 <-unlist(lapply(seqs, function(x){Biostrings::pairwiseAlignment(pattern=x, subject=init.seq, type = "overlap", substitutionMatrix = NULL, scoreOnly=TRUE)})))
+      suppressWarnings(eval.2 <-unlist(lapply(seqs.rc, function(x){Biostrings::pairwiseAlignment(pattern=x, subject=init.seq, type = "overlap", substitutionMatrix = NULL, scoreOnly=TRUE)})))
+      
+      # Get best matching seq based on alignment score
       best.match.index <- ifelse(max(eval.1) > max(eval.2), which.max(eval.1), which.max(eval.2))
       best.match.score <- ifelse(max(eval.1) > max(eval.2), eval.1[which.max(eval.1)], eval.2[which.max(eval.2)])
-      best.match <- ifelse(max(eval.1) > max(eval.2), seqs[which.max(eval.1)], seqs.rc[which.max(eval.2)])
-      best.match.qual <- ifelse(max(eval.1) > max(eval.2), seqs.qual[[which.max(eval.1)]], seqs.qual.rc[[which.max(eval.2)]])
-
-      
-      #ALIGN OVERLAPPING SEQUENCES-----------------------------
-      suppressWarnings(seq_aligned <- Biostrings::pairwiseAlignment(pattern = init.seq, subject = best.match, 
-                                                   type = "local", substitutionMatrix = NULL, 
-                                                   scoreOnly = FALSE))
-      combined_sequence1 <- paste0(Biostrings::substr(init.seq, 1, (start(pattern(seq_aligned))-1)),
-                                   pattern(seq_aligned),
-                                   Biostrings::substr(best.match, end(subject(seq_aligned)) + 1, width(best.match)))
-      
-      combined_sequence2 <- paste0(Biostrings::substr(init.seq, 1, (start(pattern(seq_aligned))-1)),
-                                   subject(seq_aligned),
-                                   Biostrings::substr(best.match, end(subject(seq_aligned)) + 1, width(best.match)))
-      
-      eval.3 <- DNAStringSet(c(combined_sequence1, combined_sequence2))
-      
-      if(nchar(gsub("-","", subject(seq_aligned))) <=10 | nchar(gsub("-","", pattern(seq_aligned))) <=10){
-        best.match.score = 0
+      best.match <- if (length(seqs) == 1) { # If only one sequence left, index is always 1
+        ifelse(max(eval.1) > max(eval.2), seqs[1], seqs.rc[1])
+      } else {
+        ifelse(max(eval.1) > max(eval.2), seqs[which.max(eval.1)], seqs.rc[which.max(eval.2)])
+      }
+      best.match.qual <- if (length(seqs) == 1) {
+        ifelse(max(eval.1) > max(eval.2), seqs.qual[[1]], seqs.qual.rc[[1]])
+      } else {
+        ifelse(max(eval.1) > max(eval.2), seqs.qual[[which.max(eval.1)]], seqs.qual.rc[[which.max(eval.2)]])
       }
       
       #---Debugging: Check alignment
-      alignment_score=0.0001
+      alignment_score <- 50
       if(best.match.score <= alignment_score) message("***Alignment failed for ", unique(paired.seqs.filt$no_suffix),": Alignment score (", round(best.match.score, 2) ,
-                                        ") less than ", alignment_score, " for at least one pair of sequences. This could be due to very short overlaps, or poor sequence quality. ",
-                                        "Manual inspection of isoQC output is recommended. Try changing isoQC parameters 'sliding_window_cutoff' and 'sliding_window_size'.\n",
-                                        "Note: A minimum of ***10bp overlap*** is needed between paired sequences.\n")
-
-      #-----------------------------
-      #Get consensus seq
-      seqs.aln.con <- DECIPHER::ConsensusSequence(eval.3[1:2], threshold = 0.05, ambiguity = TRUE)
-      #Combine query seqs + consensus side-by-side in dataframe
-      seqs.aln.con.manual <- as.data.frame(rbind(c(unlist(as.character(eval.3[1:2])),
-                                                   as.character(seqs.aln.con))))
-      #Split sequences into individual nucleotides
-      seqs.aln.con.manual.l <- lapply(1:ncol(seqs.aln.con.manual), function(x){
-        unlist.out1 <- unlist(strsplit(seqs.aln.con.manual[,x], "(?<=[-A-Z])", perl=TRUE))
-        unlist.out <- unlist(strsplit(unlist.out1, "(?<=[\\+])", perl=TRUE))
-        return(unlist.out)})
+                                                      ") less than ", alignment_score, " for at least one pair of sequences. This could be due to very short overlaps, or poor sequence quality. \n")
       
-      if(best.match.score != 0){
-      #Bind rows of list
-      seqs.aln.con.manual <- suppressMessages(bind_cols(seqs.aln.con.manual.l)) %>% `colnames<-`(c("seq1","seq2", "auto")) %>% 
-        mutate(qual_1=rep(unique(init.qual))) %>% mutate(qual_2=rep(unique(best.match.qual))) %>%
-        mutate(consensus_seq = ifelse((seq1 == "-" | seq2 == "-"), auto, ifelse(qual_1 > qual_2, seq1, seq2))) %>%
-        mutate(consensus_seq = ifelse(consensus_seq=="+", ifelse(qual_1 > qual_2, seq1, seq2), consensus_seq)) %>%
-        mutate(consensus_seq = ifelse(consensus_seq=="N", ifelse(seq1=="N", seq2, seq1), consensus_seq)) %>%
-        filter(consensus_seq!="-")
       
-      #Update index references
-      init.seq <- paste(seqs.aln.con.manual$consensus_seq, collapse="")
-      init.qual <- round(mean(c(seqs.aln.con.manual$qual_1, seqs.aln.con.manual$qual_2)), 2)
-      
-      seqs <- seqs[-best.match.index]
-      seqs.rc <- seqs.rc[-best.match.index]
-      seqs.qual <- seqs.qual[-best.match.index]
-      seqs.qual.rc <- seqs.qual.rc[-best.match.index]
-      }
-      
-      if(best.match.score == 0){
-        seqs <- NULL
+      if(best.match.score > alignment_score){
+        # アセンブリステージも "overlap" を使用
+        suppressWarnings(seq_aligned <- Biostrings::pairwiseAlignment(pattern = init.seq, subject = best.match, 
+                                                                      type = "overlap", 
+                                                                      scoreOnly = FALSE))
+        
+        # 正確なアセンブリロジック
+        aligned_pattern <- as.character(pattern(seq_aligned))
+        aligned_subject <- as.character(subject(seq_aligned))
+        
+        overlap_consensus <- as.character(
+          DECIPHER::ConsensusSequence(
+            Biostrings::DNAStringSet(c(aligned_pattern, aligned_subject)),
+            threshold = 0.5,
+            ambiguity = TRUE
+          )
+        )
+        
+        pre_overlap_part <- Biostrings::substr(init.seq, 1, start(pattern(seq_aligned)) - 1)
+        post_overlap_part <- Biostrings::substr(best.match, end(subject(seq_aligned)) + 1, nchar(best.match))
+        
+        new_consensus_seq <- paste0(
+          pre_overlap_part,
+          gsub("-", "", overlap_consensus),
+          post_overlap_part
+        )
+        
+        # Update index references
+        init.seq <- new_consensus_seq
+        init.qual <- round(mean(c(unique(init.qual), unique(best.match.qual))), 2)
+        
+        # 処理済みリードを削除
+        seqs <- seqs[-best.match.index]
+        seqs.rc <- seqs.rc[-best.match.index]
+        seqs.qual <- seqs.qual[-best.match.index]
+        seqs.qual.rc <- seqs.qual.rc[-best.match.index]
+        
+      } else { # スコアが閾値以下だった場合、ループを抜ける
+        seqs <- NULL # ループ終了
         failed.aln <- c(failed.aln, unique(paired.seqs.filt$no_suffix))
       }
-      
-      if(best.match.score <= alignment_score){
-        seqs <- NULL
-        failed.aln <- c(failed.aln, unique(paired.seqs.filt$no_suffix))
-        }
       
     } #end of while loop
     
@@ -190,7 +179,7 @@ sanger_assembly <- function(input=NULL,
     }
     return(seqs.aln.con.df) 
   }) #end of collector.list function
-
+  
   #Bind all overlapped sequences back together and add back in unpaired seqs
   if(any((bind_rows(collector.list))$aln=="pass")){
     if(length(unique((bind_rows(collector.list) %>% filter(aln=="fail"))$no_suffix))==0){
