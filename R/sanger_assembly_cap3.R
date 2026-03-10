@@ -3,8 +3,10 @@
 # -------------------------------------------------------------------------
 assemble_with_cap3 <- function(dna_string_set,
                                cap3_path = "cap3",
-                               percent_identity = 95,
-                               overlap_length = 20) {
+                               percent_identity = 90,
+                               overlap_length = 20,
+                               similarity_cutoff = 300,
+                               max_qscore_sum = 5000) {
   
   # 一時ファイルのベース名を生成
   temp_base <- tempfile()
@@ -18,7 +20,9 @@ assemble_with_cap3 <- function(dna_string_set,
     cap3_path,
     shQuote(input_fasta),
     "-p", percent_identity,
-    "-o", overlap_length
+    "-o", overlap_length,
+    "-s", similarity_cutoff,
+    "-d", max_qscore_sum
   )
   
   cat("Running CAP3...\n")
