@@ -3,10 +3,12 @@
 # -------------------------------------------------------------------------
 assemble_with_cap3 <- function(dna_string_set,
                                cap3_path = "cap3",
-                               percent_identity = 90,
+                               percent_identity = 80,
                                overlap_length = 20,
-                               similarity_cutoff = 300,
-                               max_qscore_sum = 5000) {
+                               similarity_cutoff = 251,
+                               max_qscore_sum = 5000,
+                               mismatch_score_factor = -2,
+                               gap_penalty_factor = 2) {
   
   # 一時ファイルのベース名を生成
   temp_base <- tempfile()
@@ -15,14 +17,16 @@ assemble_with_cap3 <- function(dna_string_set,
   # リードをFASTAファイルに書き出す
   Biostrings::writeXStringSet(dna_string_set, filepath = input_fasta)
   
-  # CAP3コマンドを構築
+  # CAP3コマンドを構築（新しい緩いオプションを追加）
   cap3_command <- paste(
     cap3_path,
     shQuote(input_fasta),
     "-p", percent_identity,
     "-o", overlap_length,
     "-s", similarity_cutoff,
-    "-d", max_qscore_sum
+    "-d", max_qscore_sum,
+    "-n", mismatch_score_factor,
+    "-g", gap_penalty_factor
   )
   
   cat("Running CAP3...\n")
@@ -48,7 +52,7 @@ assemble_with_cap3 <- function(dna_string_set,
     contigs <- Biostrings::readDNAStringSet(contigs_file)
     if (length(contigs) > 0) {
       # 最長のコンティグを最終結果とする
-      final_contig <- contigs[[which.max(width(contigs))]]
+      final_contig <- contigs[[which.max(Biostrings::width(contigs))]]
     }
   }
   
@@ -70,8 +74,12 @@ assemble_with_cap3 <- function(dna_string_set,
 #' @param input A character string specifying the path to the input CSV file. The CSV must
 #' contain a 'filename' column and a 'seqs_trim' column with the DNA sequences.
 #' @param suffix A regular expression string used to remove suffixes from filenames to identify groups.
-#' @param percent_identity A numeric value for the minimum percent identity for overlaps in CAP3 (default: 95).
-#' @param overlap_length A numeric value for the minimum overlap length in CAP3 (default: 40).
+#' @param percent_identity A numeric value for the minimum percent identity for overlaps in CAP3 (default: 80).
+#' @param overlap_length A numeric value for the minimum overlap length in CAP3 (default: 20).
+#' @param similarity_cutoff A numeric value for the overlap similarity score cutoff (default: 251).
+#' @param max_qscore_sum A numeric value for the max qscore sum at differences (default: 5000).
+#' @param mismatch_score_factor A numeric value for the mismatch score factor (default: -2).
+#' @param gap_penalty_factor A numeric value for the gap penalty factor (default: 2).
 #' @param cap3_path A character string specifying the path to the CAP3 executable.
 #' @param verbose A logical value indicating whether to print progress messages.
 #'
@@ -83,11 +91,15 @@ assemble_with_cap3 <- function(dna_string_set,
 #'
 #' @export
 sanger_assembly_cap3 <- function(input = NULL,
-                                  suffix = "_F.ab1|_R.ab1",
-                                  percent_identity = 95,
-                                  overlap_length = 20,
-                                  cap3_path = "cap3",
-                                  verbose = TRUE) {
+                                 suffix = "_F.ab1|_R.ab1",
+                                 percent_identity = 80,
+                                 overlap_length = 20,
+                                 similarity_cutoff = 251,
+                                 max_qscore_sum = 5000,
+                                 mismatch_score_factor = -2,
+                                 gap_penalty_factor = 2,
+                                 cap3_path = "cap3",
+                                 verbose = TRUE) {
   
   if (!requireNamespace("Biostrings", quietly = TRUE)) stop("Biostrings required")
   if (is.null(input)) stop("input must be provided")
@@ -117,13 +129,23 @@ sanger_assembly_cap3 <- function(input = NULL,
     failed.aln <- TRUE
     
     # S4オブジェクトには width() を使う
-    if (length(all_reads_in_group) < 2 || all(width(all_reads_in_group) == 0)) {
+    if (length(all_reads_in_group) < 2 || all(Biostrings::width(all_reads_in_group) == 0)) {
       message("Group ", grp, " has fewer than 2 reads or only empty sequences. Skipping assembly.")
       out_row <- paired.seqs.filt[1, , drop = FALSE]
       out_row$decision <- "Fail"
     } else {
       tryCatch({
-        final_contig <- assemble_with_cap3(all_reads_in_group, cap3_path, percent_identity, overlap_length)
+        # 引数を明示的にヘルパー関数に渡す
+        final_contig <- assemble_with_cap3(
+          dna_string_set = all_reads_in_group, 
+          cap3_path = cap3_path, 
+          percent_identity = percent_identity, 
+          overlap_length = overlap_length,
+          similarity_cutoff = similarity_cutoff,
+          max_qscore_sum = max_qscore_sum,
+          mismatch_score_factor = mismatch_score_factor,
+          gap_penalty_factor = gap_penalty_factor
+        )
         failed.aln <- (length(final_contig) == 0)
         if (!failed.aln) {
           message("Group ", grp, " successfully assembled via CAP3. Contig length: ", length(final_contig))
@@ -159,7 +181,11 @@ sanger_assembly_cap3 <- function(input = NULL,
   }
   
   final.df <- rbind(collector.df, unpaired.seqs)
-  final.df <- final.df[order(final.df$row_counter), ]
+  
+  # ここで order を使うため、もし列が消えていたらエラーにならないようチェックを入れる
+  if ("row_counter" %in% colnames(final.df)) {
+    final.df <- final.df[order(final.df$row_counter), ]
+  }
   
   csv.out.path <- paste0(sub("\\.csv$", "", input), "_consensus.csv")
   utils::write.csv(final.df, csv.out.path, row.names = FALSE)
